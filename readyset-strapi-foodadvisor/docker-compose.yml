@@ -1,0 +1,163 @@
+name: mydemos-foodadvisor-readyset
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: readyset
+      POSTGRES_PASSWORD: readyset
+      POSTGRES_DB: foodadvisor
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U readyset -d foodadvisor"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres:/var/lib/postgresql/data
+
+  cache:
+    image: docker.io/readysettech/readyset:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5433:5433"
+      - "6035:6035"
+    environment:
+      RS_API_KEY: ${RS_API_KEY-""}
+      DISABLE_TELEMETRY: ${DISABLE_TELEMETRY-false}
+      DEPLOYMENT_ENV: mydemos_foodadvisor
+      STORAGE_DIR: /state
+      PROMETHEUS_METRICS: "true"
+      QUERY_LOG_MODE: verbose
+      QUERY_CACHING: explicit
+      DEPLOYMENT: docker_compose_foodadvisor
+      LISTEN_ADDRESS: 0.0.0.0:5433
+      ALLOW_UNAUTHENTICATED_CONNECTIONS: "true"
+      UPSTREAM_DB_URL: postgresql://readyset:readyset@postgres/foodadvisor
+      CONTROLLER_ADDRESS: 0.0.0.0:6035
+      PARSING_PRESET: only-sqlparser
+    volumes:
+      - readyset:/state
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "127.0.0.1:6035/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 20s
+
+  strapi:
+    build:
+      context: ./strapi
+    depends_on:
+      cache:
+        condition: service_healthy
+    ports:
+      - "1337:1337"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 1337
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_CLIENT: postgres
+      DATABASE_HOST: cache
+      DATABASE_PORT: 5433
+      DATABASE_NAME: foodadvisor
+      DATABASE_USERNAME: readyset
+      DATABASE_PASSWORD: readyset
+      DATABASE_SSL: "false"
+      DATABASE_SCHEMA: public
+      APP_KEYS: ${APP_KEYS:-key1,key2,key3,key4}
+      API_TOKEN_SALT: ${API_TOKEN_SALT:-foodadvisor-api-token-salt}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-foodadvisor-admin-jwt-secret}
+      TRANSFER_TOKEN_SALT: ${TRANSFER_TOKEN_SALT:-foodadvisor-transfer-token-salt}
+      JWT_SECRET: ${JWT_SECRET:-foodadvisor-jwt-secret}
+      NODE_OPTIONS: "--max-old-space-size=4096"
+    volumes:
+      - strapi_uploads:/app/api/public/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:1337/_health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  postgres_exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: "postgresql://readyset:readyset@postgres:5432/foodadvisor?sslmode=disable"
+    ports:
+      - "9187:9187"
+
+  prometheus:
+    image: prom/prometheus:latest
+    depends_on:
+      cache:
+        condition: service_healthy
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    ports:
+      - "4001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  # ---- On-demand sidecars (started only via `docker compose run --rm`) ----
+  # The `tools` sidecar carries psql + python + psycopg2 so the host only
+  # needs Docker.  Seed scripts, multiplier, and bench run through this.
+  tools:
+    profiles: ["tools"]
+    build:
+      context: ./tools
+    working_dir: /demo
+    volumes:
+      - ./:/demo
+    environment:
+      STRAPI_URL: http://strapi:1337
+      RS_HOST: cache
+      RS_PORT: "5433"
+      PGPASSWORD: readyset
+      PGUSER: readyset
+      PGDATABASE: foodadvisor
+      STRAPI_ADMIN_EMAIL: admin@foodadvisor.demo
+      STRAPI_ADMIN_PASSWORD: Demo12345!
+
+  # The `k6` sidecar runs k6 without requiring it on the host.  STRAPI_URL
+  # is set so the bundled k6_load.js hits the in-network strapi service.
+  k6:
+    profiles: ["tools"]
+    image: grafana/k6:latest
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./.cache:/out
+    environment:
+      STRAPI_URL: http://strapi:1337
+
+volumes:
+  postgres: {}
+  readyset: {}
+  strapi_uploads: {}

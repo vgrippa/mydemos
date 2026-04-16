@@ -1,0 +1,21 @@
+# secrets
+.env
+.env.local
+*.pem
+
+# run artifacts
+**/.cache/
+**/seed/.cache/
+k6-summary.json
+*.log
+yarn-error.log
+
+# language caches
+__pycache__/
+*.pyc
+node_modules/
+.strapi/
+
+# OS
+.DS_Store
+Thumbs.db
